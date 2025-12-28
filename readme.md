@@ -1,6 +1,6 @@
 🎮 Bachhan-Bash
 
-A simple 2D arcade-style shooting game built using Python and Pygame, inspired by classic space-invader mechanics. The player controls a spaceship, shoots incoming enemies, and tries to achieve the highest possible score before enemies reach the danger zone.
+A simple 2D arcade-style shooting game built using Python and Pygame, inspired by classic space-invader mechanics. The player controls a spaceship, shoots incoming enemies, and tries to achieve the highest possible score before enemies reach the danger zone. The game contains explicit use of 18+ language. Viewer description is advised.
 
 📌 Overview
 

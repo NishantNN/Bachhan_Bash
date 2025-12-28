@@ -153,7 +153,7 @@ This is learning-level code, not production-quality.
 python main.py
 
 
-(Replace main.py with your actual filename.)
+(Replace main.py with your actual filename. )
 
 🧠 Intended Purpose
 

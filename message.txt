@@ -1,0 +1,232 @@
+"""Discrete Fourier Epicycles visualization from an arbitrary SVG path.
+
+Usage:
+    python3 main2.py --svg path/to/your.svg --samples 1500 --terms 200
+
+Controls:
+    Space: pause / resume
+    R: reset trace
+    Up / Down: increase / decrease number of epicycles shown
+
+Dependencies:
+    pip install pygame svg.path
+
+This file reads path/polyline/polygon elements from an SVG, samples points along the
+paths uniformly, computes the discrete Fourier transform of the sampled complex
+coordinates, and animates the epicycles reconstruction similar to 3Blue1Brown's
+Fourier visualization.
+"""
+import sys
+import math
+import cmath
+import argparse
+import xml.etree.ElementTree as ET
+from svg.path import parse_path, Line, Path
+
+import pygame
+
+
+def sample_svg_points(svg_file, num_samples=1500):
+    """Parse SVG and return points with jump markers."""
+    tree = ET.parse(svg_file)
+    root = tree.getroot()
+    svg_ns = ''
+    if root.tag.startswith('{'):
+        svg_ns = root.tag.split('}')[0] + '}'
+
+    segments = []
+    jump_markers = []  # Track which segments are jumps
+    last_end_point = None
+
+    for elem in root.iter():
+        tag = elem.tag
+        if svg_ns:
+            if tag.startswith(svg_ns):
+                tag = tag[len(svg_ns):]
+
+        # Support for <path>
+        if tag == 'path' and 'd' in elem.attrib:
+            try:
+                p = parse_path(elem.attrib['d'])
+                for seg in p:
+                    # If this segment starts far from the last end point, it's a "MoveTo"
+                    # If this segment starts far from the last end point, it's a "MoveTo"
+                    if last_end_point is not None and abs(seg.start - last_end_point) > 0.1:
+                        segments.append(Line(last_end_point, seg.start))
+                        jump_markers.append(True)  # Mark as jump
+
+                    segments.append(seg)
+                    jump_markers.append(False)  # Actual drawing segment
+                    last_end_point = seg.end
+            except Exception:
+                continue
+
+        # Support for <polyline> / <polygon>
+        if tag in ('polyline', 'polygon') and 'points' in elem.attrib:
+            pts_text = elem.attrib['points'].replace(',', ' ').split()
+            pts = [float(p) for p in pts_text]
+            if len(pts) >= 4:
+                coords = [complex(pts[i], pts[i + 1]) for i in range(0, len(pts), 2)]
+
+                # If we were already drawing elsewhere, jump to the start of this poly
+                if last_end_point is not None and abs(coords[0] - last_end_point) > 0.1:
+                    segments.append(Line(last_end_point, coords[0]))
+                    jump_markers.append(True)  # Mark as jump
+
+                for i in range(len(coords) - 1):
+                    segments.append(Line(coords[i], coords[i + 1]))
+                    jump_markers.append(False)
+
+                if tag == 'polygon':
+                    segments.append(Line(coords[-1], coords[0]))
+                    jump_markers.append(False)
+                    last_end_point = coords[0]
+                else:
+                    last_end_point = coords[-1]
+
+    if not segments:
+        raise RuntimeError('No valid path elements found in SVG')
+
+    # Automatically close the loop if the end is far from the start
+    if segments:
+        start_pt = segments[0].start
+        end_pt = segments[-1].end
+        if abs(start_pt - end_pt) > 0.1:
+            segments.append(Line(end_pt, start_pt))
+            jump_markers.append(True)
+
+    # Sample uniformly and track which samples are in jump regions
+    seg_lengths = [seg.length(error=1e-5) for seg in segments]
+    total_len = sum(seg_lengths)
+
+    points = []
+    point_is_jump = []
+
+    for i in range(num_samples):
+        d = (i / num_samples) * total_len
+        acc = 0.0
+        for seg, seg_len, is_jump in zip(segments, seg_lengths, jump_markers):
+            if acc + seg_len >= d or seg == segments[-1]:
+                t = (d - acc) / seg_len if seg_len > 0 else 0
+                points.append(seg.point(t))
+                point_is_jump.append(is_jump)
+                break
+            acc += seg_len
+
+    return points, point_is_jump
+
+
+def dft(x):
+    N = len(x)
+    X = []
+    for k in range(N):
+        s = 0 + 0j
+        for n in range(N):
+            s += x[n] * cmath.exp(-2j * math.pi * k * n / N)
+        s = s / N
+        freq = k if k <= N // 2 else k - N
+        X.append({'complex': s, 'freq': freq, 'amp': abs(s), 'phase': math.atan2(s.imag, s.real)})
+    X.sort(key=lambda v: v['amp'], reverse=True)
+    return X
+
+
+def run(svg_path, samples=1500, terms=None, fps=60):
+    pts, is_jump = sample_svg_points(svg_path, num_samples=samples)
+    mean = sum(pts) / len(pts)
+    pts_centered = [p - mean for p in pts]
+    coeffs = dft(pts_centered)
+
+    WIDTH, HEIGHT = 1000, 800
+    # Scale to fit screen based on the actual points, not the sum of radii
+    max_dist = max(abs(p) for p in pts_centered) if pts_centered else 0
+    scale = min(WIDTH, HEIGHT) * 0.45 / max_dist if max_dist > 0 else 1.0
+    
+    for c in coeffs:
+        c['complex'] *= scale
+        c['amp'] *= scale
+
+    pygame.init()
+    WIN = pygame.display.set_mode((WIDTH, HEIGHT))
+    pygame.display.set_caption('Fourier Epicycles (Fixed Jumps)')
+    clock = pygame.time.Clock()
+    font = pygame.font.SysFont('Arial', 14)
+
+    center = complex(WIDTH // 2, HEIGHT // 2)
+    t = 0.0
+    dt = 1.0 / len(pts)
+    paused = False
+    trace = []  # Stores (x, y, should_draw) tuples
+    show_terms = terms if terms is not None else len(coeffs)
+
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit();
+                sys.exit()
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    if WIDTH - 40 <= event.pos[0] <= WIDTH - 10 and 10 <= event.pos[1] <= 40:
+                        pygame.quit()
+                        sys.exit()
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE: pygame.quit(); sys.exit()
+                if event.key == pygame.K_SPACE: paused = not paused
+                if event.key == pygame.K_r: trace = []; t = 0
+                if event.key == pygame.K_UP: show_terms = min(len(coeffs), show_terms + 1)
+                if event.key == pygame.K_DOWN: show_terms = max(1, show_terms - 1)
+
+        WIN.fill((15, 15, 20))
+
+        # Calculate Epicycles
+        pos = center
+        for c in coeffs[:show_terms]:
+            prev_pos = pos
+            angle = c['phase'] + 2 * math.pi * c['freq'] * t
+            pos += complex(math.cos(angle), math.sin(angle)) * c['amp']
+
+            # Draw Circles and Spokes
+            if c['amp'] > 0.5:  # Don't draw tiny circles
+                pygame.draw.circle(WIN, (60, 60, 80), (int(prev_pos.real), int(prev_pos.imag)), int(c['amp']), 1)
+                pygame.draw.line(WIN, (100, 100, 100), (int(prev_pos.real), int(prev_pos.imag)),
+                                 (int(pos.real), int(pos.imag)), 1)
+
+        # Update trace with jump information
+        current_idx = int(t * len(pts)) % len(pts)
+        current_pt = (int(pos.real), int(pos.imag), not is_jump[current_idx])
+        trace.append(current_pt)
+        if len(trace) > len(pts): trace.pop(0)
+
+        # Draw Trace, respecting jump markers
+        if len(trace) > 1:
+            for i in range(len(trace) - 1):
+                x1, y1, draw1 = trace[i]
+                x2, y2, draw2 = trace[i + 1]
+                # Only draw if both points say they should be drawn
+                if draw1 and draw2:
+                    pygame.draw.line(WIN, (0, 255, 150), (x1, y1), (x2, y2), 2)
+
+        # UI
+        ui_txt = font.render(f"Terms: {show_terms} | Points: {len(pts)} | Space: Pause | R: Reset", True,
+                             (200, 200, 200))
+        WIN.blit(ui_txt, (10, 10))
+
+        # Draw Close Button (Red Square with X)
+        close_rect = pygame.Rect(WIDTH - 40, 10, 30, 30)
+        pygame.draw.rect(WIN, (200, 50, 50), close_rect)
+        pygame.draw.line(WIN, (255, 255, 255), (close_rect.left + 5, close_rect.top + 5), (close_rect.right - 5, close_rect.bottom - 5), 2)
+        pygame.draw.line(WIN, (255, 255, 255), (close_rect.left + 5, close_rect.bottom - 5), (close_rect.right - 5, close_rect.top + 5), 2)
+
+        pygame.display.flip()
+        if not paused:
+            t += dt
+            if t >= 1.0: t = 0
+        clock.tick(fps)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--svg', required=True)
+    parser.add_argument('--samples', type=int, default=1200)
+    parser.add_argument('--terms', type=int, default=150)
+    args = parser.parse_args()
+    run(args.svg, samples=args.samples, terms=args.terms)
